@@ -50,6 +50,10 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
+    "RFA_Conv",
+    "Triplet_Attention",
+    "Zpool",
+    "AttentionGate"
 )
 
 
@@ -1356,3 +1360,70 @@ class A2C2f(nn.Module):
         if self.gamma is not None:
             return x + self.gamma.view(-1, len(self.gamma), 1, 1) * y
         return y
+
+class RFAConv(nn.Module):
+    """
+    Receptive Field Attention Convolution (RFAConv) with Ultralytics' Attention module.
+    Dynamically adjusts receptive fields using attention mechanisms.
+    """
+    def __init__(self, c1, c2, kernel_size=3, stride=1, padding=None, groups=1, dilation=1, num_heads=8, attn_ratio=0.5):
+        """
+        Args:
+            c1 (int): Number of input channels.
+            c2 (int): Number of output channels.
+            kernel_size (int): Convolutional kernel size.
+            stride (int): Stride for convolution.
+            padding (int): Padding for convolution.
+            groups (int): Number of groups for grouped convolution.
+            dilation (int): Dilation rate for convolution.
+            num_heads (int): Number of attention heads.
+            attn_ratio (float): Ratio of attention key dimension to head dimension.
+        """
+        super().__init__()
+        self.conv = Conv(c1, c2, kernel_size, stride, autopad(kernel_size, padding), groups=groups, dilation=dilation)
+        self.attention = Attention(dim=c2, num_heads=num_heads, attn_ratio=attn_ratio)  # Ultralytics' Attention module
+
+    def forward(self, x):
+        """
+        Forward pass: Apply convolution followed by attention mechanism.
+        """
+        x = self.conv(x)  # Standard convolution operation
+        x = self.attention(x)  # Apply attention mechanism to enhance receptive field
+        return x
+    
+class ZPool(nn.Module):
+    def forward(self, x):
+        return torch.cat((torch.max(x, dim=1)[0].unsqueeze(1), torch.mean(x, dim=1).unsqueeze(1)), dim=1)
+
+class AttentionGate(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(AttentionGate, self).__init__()
+        self.compress = ZPool()
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, stride=1,
+                              padding=(kernel_size - 1) // 2, bias=False)
+
+    def forward(self, x):
+        x_compress = self.compress(x)
+        x_out = self.conv(x_compress)
+        scale = torch.sigmoid(x_out)
+        return x * scale
+
+class TripletAttention(nn.Module):
+    def __init__(self):
+        super(TripletAttention, self).__init__()
+        self.cw = AttentionGate()  # Channel-to-Width attention
+        self.hc = AttentionGate()  # Height-to-Channel attention
+        self.no_spatial = False
+
+    def forward(self, x):
+        x_perm1 = x.permute(0, 2, 1, 3).contiguous()  # Permute for C-W interaction
+        x_out1 = self.cw(x_perm1).permute(0, 2, 1, 3).contiguous()
+
+        x_perm2 = x.permute(0, 3, 2, 1).contiguous()  # Permute for H-C interaction
+        x_out2 = self.hc(x_perm2).permute(0, 3, 2, 1).contiguous()
+
+        if not self.no_spatial:
+            x_out3 = self.cw(x)
+            return (x_out1 + x_out2 + x_out3) / 3
+        else:
+            return (x_out1 + x_out2) / 2
