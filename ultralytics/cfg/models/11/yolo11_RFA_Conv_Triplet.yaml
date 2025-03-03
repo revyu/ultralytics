@@ -1,0 +1,45 @@
+
+
+# Parameters
+nc: 80  # number of classes
+scales:  # model compound scaling constants
+  # [depth, width, max_channels]
+  n: [0.50, 0.25, 1024]  # Nano model
+  s: [0.50, 0.50, 1024]  # Small model
+  m: [0.50, 1.00, 512]   # Medium model
+  l: [1.00, 1.00, 512]   # Large model
+  x: [1.00, 1.50, 512]   # Extra-large model
+
+# YOLOv11 backbone with RFAConv and Triplet Attention
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]]              # Initial downsampling (P1/2)
+  - [-1, 1, RFAConv, [128, 3, 2]]          # Receptive Field Attention Convolution (P2/4)
+  - [-1, 2, C2f_RFAConv, [256]]            # Replace C2f with C2f_RFAConv (multi-scale feature extraction)
+  - [-1, 1, RFAConv, [256, 3, 2]]          # Downsample to P3/8
+  - [-1, 2, C2f_RFAConv, [512]]            # Multi-scale feature extraction with RFAConv
+  - [-1, Triplet_Attention]                # Add Triplet Attention after P3/8
+  - [-1, 1, RFAConv, [512, 3, 2]]          # Downsample to P4/16
+  - [-1, Triplet_Attention]                # Add Triplet Attention after P4/16
+  - [-1, 2, C2f_RFAConv, [512]]            # Enhanced feature extraction at P4/16
+  - [-1, Triplet_Attention]                # Add Triplet Attention after enhanced feature extraction
+  - [-1, 1, RFAConv, [1024, 3, 2]]         # Downsample to P5/32
+  - [-1, Triplet_Attention]                # Add Triplet Attention after P5/32
+  - [-1, SPPF, [1024]]                     # Spatial Pyramid Pooling Fast (SPPF)
+
+# YOLOv11 head with detection layers and attention mechanisms
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 8], 1, Concat, [1]]              # Concatenate features from P4/16
+  - [-1, 2, C2f_RFAConv, [512]]            # Feature extraction with C2f_RFAConv
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 4], 1, Concat, [1]]              # Concatenate features from P3/8
+  - [-1, 2, C2f_RFAConv, [256]]            # Feature extraction with C2f_RFAConv
+  - [-1, 1, RFAConv, [256, 3, 2]]
+  - [[-1, 14], 1, Concat, [1]]             # Concatenate features
+  - [-1, 2, C2f_RFAConv, [512]]            # Feature extraction with C2f_RFAConv
+  - [-1, 1, RFAConv, [512, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]]             # Concatenate features
+  - [-1, 2, C2f_RFAConv, [1024]]           # Feature extraction with C2f_RFAConv
+  - [-1, Triplet_Attention]                # Add Triplet Attention before detection
+  - [[15, 18, 21], 1, Detect, [nc]]        # Detect(P3, P4, P5)
