@@ -251,6 +251,7 @@ class C2f(nn.Module):
         return self.cv2(torch.cat(y, 1))
 
 
+
 class C3(nn.Module):
     """CSP Bottleneck with 3 convolutions."""
 
@@ -1427,3 +1428,41 @@ class TripletAttention(nn.Module):
             return (x_out1 + x_out2 + x_out3) / 3
         else:
             return (x_out1 + x_out2) / 2
+        
+class C2f_RFAConv(nn.Module):
+    """
+    C2f_RFAConv module: A modified version of C2f that uses RFAConv for enhanced feature extraction.
+    """
+
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        """
+        Args:
+            c1 (int): Number of input channels.
+            c2 (int): Number of output channels.
+            n (int): Number of RFAConv blocks in the module.
+            shortcut (bool): Whether to use residual connections.
+            g (int): Number of groups for grouped convolution.
+            e (float): Expansion ratio for bottleneck layers.
+        """
+        super().__init__()
+        self.c = int(c2 * e)  # Hidden channels
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)  # First convolution layer
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # Final projection layer
+        self.m = nn.ModuleList(RFAConv(self.c, self.c, kernel_size=3, stride=1, padding=1) for _ in range(n))  # RFAConv blocks
+
+    def forward(self, x):
+        """
+        Forward pass through C2f_RFAConv.
+        """
+        y = list(self.cv1(x).chunk(2, 1))  # Split input into two parts along channel dimension
+        y.extend(m(y[-1]) for m in self.m)  # Apply RFAConv blocks sequentially
+        return self.cv2(torch.cat(y, 1))  # Concatenate all outputs and project to output channels
+
+    def forward_split(self, x):
+        """
+        Alternate forward pass using split() instead of chunk().
+        """
+        y = self.cv1(x).split((self.c, self.c), 1)
+        y = [y[0], y[1]]
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
