@@ -1362,12 +1362,16 @@ class A2C2f(nn.Module):
             return x + self.gamma.view(-1, len(self.gamma), 1, 1) * y
         return y
 
+
+
+# вот этот класс надо переписывать он просто накидывает аттеншен поверх ВСЕГО слоя 
+# а надо накидывать отдельно на каждый фильтр насколько я понял
 class RFAConv(nn.Module):
     """
     Receptive Field Attention Convolution (RFAConv) with Ultralytics' Attention module.
     Dynamically adjusts receptive fields using attention mechanisms.
     """
-    def __init__(self, c1, c2, kernel_size=3, stride=1, padding=None, groups=1, dilation=1, num_heads=8, attn_ratio=0.5):
+    def __init__(self, c1, c2, kernel_size=3, stride=1, padding=None, num_heads=8, attn_ratio=0.5):
         """
         Args:
             c1 (int): Number of input channels.
@@ -1381,7 +1385,7 @@ class RFAConv(nn.Module):
             attn_ratio (float): Ratio of attention key dimension to head dimension.
         """
         super().__init__()
-        self.conv = Conv(c1, c2, kernel_size, stride, autopad(kernel_size, padding), groups=groups, dilation=dilation)
+        self.conv = Conv(c1, c2, kernel_size, stride, autopad(kernel_size, padding))
         self.attention = Attention(dim=c2, num_heads=num_heads, attn_ratio=attn_ratio)  # Ultralytics' Attention module
 
     def forward(self, x):

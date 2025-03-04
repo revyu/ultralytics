@@ -58,6 +58,12 @@ from .block import (
     ResNetLayer,
     SCDown,
     TorchVision,
+    C2f_RFAConv,
+    TripletAttention,
+    AttentionGate,
+    ZPool,
+    RFAConv,
+
 )
 from .conv import (
     CBAM,
@@ -162,4 +168,10 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
+
+    "C2f_RFAConv",
+    "TripletAttention",
+    "AttentionGate",
+    "ZPool",
+    "RFAConv",
 )
