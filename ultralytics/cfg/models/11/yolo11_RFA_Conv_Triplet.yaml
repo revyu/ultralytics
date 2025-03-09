@@ -1,45 +1,43 @@
-
-
+# Ultralytics YOLOv11-like model with RFAConv and Triplet Attention
+# Combining normal YOLO layers with RFAConv and Triplet Attention
 # Parameters
 nc: 80  # number of classes
-scales:  # model compound scaling constants
-  # [depth, width, max_channels]
+
+scales:
   n: [0.50, 0.25, 1024]  # Nano model
   s: [0.50, 0.50, 1024]  # Small model
   m: [0.50, 1.00, 512]   # Medium model
   l: [1.00, 1.00, 512]   # Large model
   x: [1.00, 1.50, 512]   # Extra-large model
 
-# YOLOv11 backbone with RFAConv and Triplet Attention
+# YOLOv11 backbone
 backbone:
-  # [from, repeats, module, args]
-  - [-1, 1, Conv, [64, 3, 2]]              # Initial downsampling (P1/2)
-  - [-1, 1, RFAConv, [128, 3, 2]]          # Receptive Field Attention Convolution (P2/4)
-  - [-1, 2, C2f_RFAConv, [256]]            # Replace C2f with C2f_RFAConv (multi-scale feature extraction)
-  - [-1, 1, RFAConv, [256, 3, 2]]          # Downsample to P3/8
-  - [-1, 2, C2f_RFAConv, [512]]            # Multi-scale feature extraction with RFAConv
-  - [-1, Triplet_Attention]                # Add Triplet Attention after P3/8
-  - [-1, 1, RFAConv, [512, 3, 2]]          # Downsample to P4/16
-  - [-1, Triplet_Attention]                # Add Triplet Attention after P4/16
-  - [-1, 2, C2f_RFAConv, [512]]            # Enhanced feature extraction at P4/16
-  - [-1, Triplet_Attention]                # Add Triplet Attention after enhanced feature extraction
-  - [-1, 1, RFAConv, [1024, 3, 2]]         # Downsample to P5/32
-  - [-1, Triplet_Attention]                # Add Triplet Attention after P5/32
-  - [-1, SPPF, [1024]]                     # Spatial Pyramid Pooling Fast (SPPF)
+  # Each element: [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]]                   # layer 0: Conv(3,64,k=3,s=2)  → P1/2
+  - [-1, 1, RFAConv, [128, 3, 2, 1]]              # layer 1: RFAConv(64->128,k=3,s=2,p=1)  → P2/4
+  - [-1, 2, C2f_RFAConv, [256]]                   # layer 2: C2f_RFAConv(128->256, n=2, shortcut=True)
+  - [-1, 1, Conv, [256, 3, 2]]                    # layer 3: Conv(256,256,k=3,s=2)  → P3/8
+  - [-1, 2, C2f, [512]]                          # layer 4: C2f(256->512, n=2, shortcut=True)
+  - [-1, 1, TripletAttention, []]                # layer 5: TripletAttention (без аргументов)
+  - [-1, 1, Conv, [512, 3, 2]]                    # layer 6: Conv(512,512,k=3,s=2)  → P4/16
+  - [-1, 2, C2f_RFAConv, [512]]                   # layer 7: C2f_RFAConv(512->512, n=2, shortcut=True)
+  - [-1, 1, Conv, [1024, 3, 2]]                   # layer 8: Conv(512,1024,k=3,s=2)  → P5/32
+  - [-1, 2, C2f, [1024]]                          # layer 9: C2f(1024->1024, n=2, shortcut=True)
+  - [-1, 1, SPPF, [1024, 5]]                       # layer 10: SPPF(1024,1024,k=5)
 
-# YOLOv11 head with detection layers and attention mechanisms
+# YOLOv11 head
 head:
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 8], 1, Concat, [1]]              # Concatenate features from P4/16
-  - [-1, 2, C2f_RFAConv, [512]]            # Feature extraction with C2f_RFAConv
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 4], 1, Concat, [1]]              # Concatenate features from P3/8
-  - [-1, 2, C2f_RFAConv, [256]]            # Feature extraction with C2f_RFAConv
-  - [-1, 1, RFAConv, [256, 3, 2]]
-  - [[-1, 14], 1, Concat, [1]]             # Concatenate features
-  - [-1, 2, C2f_RFAConv, [512]]            # Feature extraction with C2f_RFAConv
-  - [-1, 1, RFAConv, [512, 3, 2]]
-  - [[-1, 12], 1, Concat, [1]]             # Concatenate features
-  - [-1, 2, C2f_RFAConv, [1024]]           # Feature extraction with C2f_RFAConv
-  - [-1, Triplet_Attention]                # Add Triplet Attention before detection
-  - [[15, 18, 21], 1, Detect, [nc]]        # Detect(P3, P4, P5)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # layer 11: Upsample(scale_factor=2) → dims ×2
+  - [[-1, 7], 1, Concat, [1]]                     # layer 12: Concat([layer11, layer7]); channels: 1024+512=1536
+  - [-1, 2, C2f, [512]]                           # layer 13: C2f(1536->512, n=2, shortcut=True)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # layer 14: Upsample(scale_factor=2)
+  - [[-1, 3], 1, Concat, [1]]                     # layer 15: Concat([layer14, layer3]); channels: 512+256=768
+  - [-1, 2, C2f, [256]]                           # layer 16: C2f(768->256, n=2, shortcut=True)
+  - [-1, 1, Conv, [256, 3, 2]]                     # layer 17: Conv(256->256,k=3,s=2)
+  - [[-1, 13], 1, Concat, [1]]                    # layer 18: Concat([layer17, layer13]); channels: 256+512=768
+  - [-1, 2, C2f, [512]]                           # layer 19: C2f(768->512, n=2, shortcut=True)
+  - [-1, 1, Conv, [512, 3, 2]]                     # layer 20: Conv(512->512,k=3,s=2)
+  - [[-1, 10], 1, Concat, [1]]                    # layer 21: Concat([layer20, layer10]); channels: 512+1024=1536
+  - [-1, 2, C2f_RFAConv, [1024]]                  # layer 22: C2f_RFAConv(1536->1024, n=2, shortcut=True)
+  - [-1, 1, TripletAttention, []]                # layer 23: TripletAttention (без аргументов)
+  - [[16, 19, 22], 1, Detect, [nc]]               # layer 24: Detect; входы: [layer16, layer19, layer22] → [256, 512, 1024]
