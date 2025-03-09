@@ -1366,107 +1366,294 @@ class A2C2f(nn.Module):
 
 # вот этот класс надо переписывать он просто накидывает аттеншен поверх ВСЕГО слоя 
 # а надо накидывать отдельно на каждый фильтр насколько я понял
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class RFAConv(nn.Module):
     """
-    Receptive Field Attention Convolution (RFAConv) with Ultralytics' Attention module.
-    Dynamically adjusts receptive fields using attention mechanisms.
+    Пример модуля Receptive Field Attention Convolution,
+    где для каждого локального рецептивного поля мы учимся
+    генерировать собственные весовые коэффициенты (attention map).
     """
-    def __init__(self, c1, c2, kernel_size=3, stride=1, padding=None, num_heads=8, attn_ratio=0.5):
-        """
-        Args:
-            c1 (int): Number of input channels.
-            c2 (int): Number of output channels.
-            kernel_size (int): Convolutional kernel size.
-            stride (int): Stride for convolution.
-            padding (int): Padding for convolution.
-            groups (int): Number of groups for grouped convolution.
-            dilation (int): Dilation rate for convolution.
-            num_heads (int): Number of attention heads.
-            attn_ratio (float): Ratio of attention key dimension to head dimension.
-        """
-        super().__init__()
-        self.conv = Conv(c1, c2, kernel_size, stride, autopad(kernel_size, padding))
-        self.attention = Attention(dim=c2, num_heads=num_heads, attn_ratio=attn_ratio)  # Ultralytics' Attention module
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        groups=1,
+        reduction=4,  # для снижения размерности во "вспомогательной" ветви
+    ):
+        super(RFAConv, self).__init__()
+        
+        # --- Основная сверточная ветвь ---
+        self.conv_main = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=groups,
+            bias=False
+        )
+        self.bn_main = nn.BatchNorm2d(out_channels)
+
+        # --- Внимание (attention) ---
+        # Идея: вычислить "маску внимания" (такого же размера, что и выход conv_main),
+        # чтобы затем помножить результат основной свёртки на эту маску.
+        #
+        # Ниже - простейший вариант, когда мы берём тот же вход (in_channels) и
+        # прогоняем через ещё одну свёртку (или несколько слоёв), получая на выходе
+        # out_channels (чтобы помножить по-канально).
+        
+        self.conv_att = nn.Conv2d(
+            in_channels,
+            out_channels // reduction,  # сократим кол-во каналов, чтобы снизить вычисл.сложность
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=groups,
+            bias=False
+        )
+        self.bn_att1 = nn.BatchNorm2d(out_channels // reduction)
+
+        # Восстанавливаем каналы назад к out_channels
+        self.conv_att2 = nn.Conv2d(
+            out_channels // reduction,
+            out_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=False
+        )
+        self.bn_att2 = nn.BatchNorm2d(out_channels)
+
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        """
-        Forward pass: Apply convolution followed by attention mechanism.
-        """
-        x = self.conv(x)  # Standard convolution operation
-        x = self.attention(x)  # Apply attention mechanism to enhance receptive field
-        return x
-    
+        # --- Основная ветвь (feature extraction) ---
+        feat = self.conv_main(x)           # [B, out_channels, H, W]
+        feat = self.bn_main(feat)
+
+        # --- Ветвь внимания ---
+        att = self.conv_att(x)            # [B, out_channels//reduction, H, W]
+        att = self.bn_att1(att)
+        att = F.relu(att, inplace=True)
+
+        att = self.conv_att2(att)         # [B, out_channels, H, W]
+        att = self.bn_att2(att)
+        att = self.sigmoid(att)           # значения в диапазоне [0..1]
+
+        # --- Применяем карту внимания к результату основной ветви ---
+        out = feat * att                  # Помножили поэлементно (B,C,H,W)
+
+        return out
+
 class ZPool(nn.Module):
-    def forward(self, x):
-        return torch.cat((torch.max(x, dim=1)[0].unsqueeze(1), torch.mean(x, dim=1).unsqueeze(1)), dim=1)
+    """
+    Сжимает (compress) вход x по двум статистикам вдоль оси каналов (dim=1):
+    1) Максимум по каналам
+    2) Среднее по каналам
+    На выходе тензор: [B, 2, H, W], где 2 соответствует (max + mean).
+    """
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x.shape = [B, C, H, W]
+        # max -> [B, H, W], mean -> [B, H, W]
+        # Далее добавляем dim=1, склеиваем => [B, 2, H, W]
+        max_pool = torch.max(x, dim=1, keepdim=True)[0]   # [B, 1, H, W]
+        mean_pool = torch.mean(x, dim=1, keepdim=True)    # [B, 1, H, W]
+        return torch.cat([max_pool, mean_pool], dim=1)    # [B, 2, H, W]
 
 class AttentionGate(nn.Module):
+    """
+    Пространственное внимание: сворачиваем max/mean-пулы (2 канала) в 1 канал,
+    берём сигмоиду и масштабируем входной x на полученную 'scale'.
+    """
     def __init__(self, kernel_size=7):
-        super(AttentionGate, self).__init__()
+        super().__init__()
         self.compress = ZPool()
-        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, stride=1,
-                              padding=(kernel_size - 1) // 2, bias=False)
-
-    def forward(self, x):
+        self.conv = nn.Conv2d(
+            in_channels=2,
+            out_channels=1,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=(kernel_size - 1) // 2,
+            bias=False
+        )
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_compress = self.compress(x)
         x_out = self.conv(x_compress)
         scale = torch.sigmoid(x_out)
+        if scale.shape[2:] != x.shape[2:]:
+            scale = torch.nn.functional.interpolate(scale, size=x.shape[2:], mode='bilinear', align_corners=False)
         return x * scale
 
+    
+
 class TripletAttention(nn.Module):
-    def __init__(self):
-        super(TripletAttention, self).__init__()
-        self.cw = AttentionGate()  # Channel-to-Width attention
-        self.hc = AttentionGate()  # Height-to-Channel attention
-        self.no_spatial = False
+    """
+    Реализация упрощённого Triplet Attention:
+    1) первая ветвь: permute(0,2,1,3) + attention + обратно permute
+    2) вторая ветвь: permute(0,3,2,1) + attention + обратно permute
+    3) (опционально) без permute -> spatial attention напрямую
+    После чего результаты усредняются.
+    
+    Ссылки:
+    [1] Diganta Misra. 
+        "Rotate to attend: Convolutional triplet attention module." 
+        WACV 2021.
+    """
 
-    def forward(self, x):
-        x_perm1 = x.permute(0, 2, 1, 3).contiguous()  # Permute for C-W interaction
-        x_out1 = self.cw(x_perm1).permute(0, 2, 1, 3).contiguous()
+    def __init__(self, kernel_size=7, no_spatial=False):
+        """
+        Args:
+            kernel_size (int): Размер свёртки в AttentionGate.
+            no_spatial (bool): Если True, не использовать третью ветвь (без permute).
+        """
+        super().__init__()
+        self.no_spatial = no_spatial
 
-        x_perm2 = x.permute(0, 3, 2, 1).contiguous()  # Permute for H-C interaction
-        x_out2 = self.hc(x_perm2).permute(0, 3, 2, 1).contiguous()
+        # Два экземпляра AttentionGate 
+        # (можно использовать разные, но в большинстве реализаций они одинаковы)
+        self.branch1 = AttentionGate(kernel_size=kernel_size)
+        self.branch2 = AttentionGate(kernel_size=kernel_size)
+
+        # При желании можно сделать третий AttentionGate,
+        # но в исходных кодах TripletAttention иногда переиспользуется один и тот же
+        # (в вашем примере - re-use branch1)
+        self.branch3 = AttentionGate(kernel_size=kernel_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B, C, H, W]
+        """
+        # --- Ветвь 1 ---
+        # permute => [B, H, C, W]
+        x_perm1 = x.permute(0, 2, 1, 3).contiguous()
+        # attention => [B, H, C, W], scale по тем же осям
+        x_out1 = self.branch1(x_perm1)
+        # permute обратно => [B, C, H, W]
+        x_out1 = x_out1.permute(0, 2, 1, 3).contiguous()
+
+       # --- Ветвь 2 (исправленная) ---
+        x_perm2 = x.permute(0, 3, 1, 2).contiguous()  # [B, W, C, H]
+        x_out2 = self.branch2(x_perm2)
+        x_out2 = x_out2.permute(0, 2, 3, 1).contiguous()  # возвращаем в [B, C, H, W]
+
 
         if not self.no_spatial:
-            x_out3 = self.cw(x)
-            return (x_out1 + x_out2 + x_out3) / 3
+            # --- Ветвь 3 (пространственное внимание без permute) ---
+            x_out3 = self.branch3(x)
+            # Усредняем все три
+            return (x_out1 + x_out2 + x_out3) / 3.0
         else:
-            return (x_out1 + x_out2) / 2
-        
+            # Если no_spatial=True, берём среднее из первых двух
+            return (x_out1 + x_out2) / 2.0    
+
+
 class C2f_RFAConv(nn.Module):
     """
-    C2f_RFAConv module: A modified version of C2f that uses RFAConv for enhanced feature extraction.
+    C2f_RFAConv module: 
+    Модификация C2f, в которой вместо стандартных Bottleneck-блоков 
+    используются блоки RFAConv для более эффективной локальной 
+    экстракции признаков.
     """
 
-    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+    def __init__(
+        self,
+        c1: int,       # число входных каналов
+        c2: int,       # число выходных каналов
+        n: int = 1,    # число RFAConv-блоков
+        shortcut: bool = False,  # использовать ли skip connection внутри цикла
+        g: int = 1,    # группировка свёрток
+        e: float = 0.5 # коэффициент "expansion" для промежуточных каналов
+    ):
         """
         Args:
             c1 (int): Number of input channels.
             c2 (int): Number of output channels.
             n (int): Number of RFAConv blocks in the module.
-            shortcut (bool): Whether to use residual connections.
+            shortcut (bool): Whether to use residual connections inside each block.
             g (int): Number of groups for grouped convolution.
-            e (float): Expansion ratio for bottleneck layers.
+            e (float): Expansion ratio for hidden channels.
         """
         super().__init__()
-        self.c = int(c2 * e)  # Hidden channels
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)  # First convolution layer
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # Final projection layer
-        self.m = nn.ModuleList(RFAConv(self.c, self.c, kernel_size=3, stride=1, padding=1) for _ in range(n))  # RFAConv blocks
+        self.shortcut = shortcut
+        # Расчитываем количество "скрытых" каналов
+        self.c = int(c2 * e)
 
-    def forward(self, x):
-        """
-        Forward pass through C2f_RFAConv.
-        """
-        y = list(self.cv1(x).chunk(2, 1))  # Split input into two parts along channel dimension
-        y.extend(m(y[-1]) for m in self.m)  # Apply RFAConv blocks sequentially
-        return self.cv2(torch.cat(y, 1))  # Concatenate all outputs and project to output channels
+        # Первый сверточный слой (обычно k=1 в C2f, 
+        # чтобы преобразовать c1 -> 2*c) 
+        self.cv1 = Conv(c1, 2 * self.c, k=1, s=1, g=g)
 
-    def forward_split(self, x):
+        # Модульный список из n RFAConv-блоков:
+        # каждый принимает self.c каналов на вход и 
+        # выдаёт self.c каналов на выход
+        self.m = nn.ModuleList([
+            RFAConv(
+                in_channels=self.c,
+                out_channels=self.c,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                groups=g  # проброс группировки, если нужно
+            ) 
+            for _ in range(n)
+        ])
+
+        # Финальный "прожектор" (обычно k=1) 
+        # свёртка: (2 + n)*self.c -> c2
+        self.cv2 = Conv((2 + n) * self.c, c2, k=1, s=1, g=g)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Alternate forward pass using split() instead of chunk().
+        Forward pass через C2f_RFAConv по аналогии с C2f:
+        1) Пропускаем x через cv1, получаем тензор [B, 2*c, H, W].
+        2) Делим этот тензор на 2 части (chunk): y[0], y[1].
+        3) Последовательно подаём y[-1] в каждый RFAConv-блок. 
+           Если shortcut=True, то делаем skip connection.
+        4) Склеиваем все y по оси каналов => cv2 => выход.
         """
-        y = self.cv1(x).split((self.c, self.c), 1)
-        y = [y[0], y[1]]
-        y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
+        # Шаг 1: свёртка 1x1 => [B, 2*self.c, H, W]
+        x_1x1 = self.cv1(x)
+
+        # Шаг 2: делим на две части по каналам: [B, c, H, W] + [B, c, H, W]
+        y = list(x_1x1.chunk(2, dim=1))  # y[0], y[1]
+
+        # Шаг 3: прогоняем через RFAConv-блоки
+        #         добавляя результат в список y
+        for block in self.m:
+            out = block(y[-1])   # вход очередной блок = последний элемент из y
+            if self.shortcut:
+                out = out + y[-1]  # skip-connection
+            y.append(out)
+
+        # Шаг 4: конкатенируем все элементы y => [B, (2+n)*c, H, W]
+        cat_y = torch.cat(y, dim=1)
+
+        # Пропускаем через финальную свёртку => [B, c2, H, W]
+        return self.cv2(cat_y)
+
+    def forward_split(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Альтернативная версия: 
+        Вместо chunk(2, dim=1) используем split((self.c, self.c), dim=1).
+        Функционально эквивалентно, иногда используют для отладки или 
+        когда формы могут различаться.
+        """
+        x_1x1 = self.cv1(x)
+        # split([self.c, self.c], 1) вернёт кортеж из 2 частей
+        y0, y1 = x_1x1.split((self.c, self.c), dim=1)
+        y = [y0, y1]
+
+        for block in self.m:
+            out = block(y[-1])
+            if self.shortcut:
+                out = out + y[-1]
+            y.append(out)
+
+        cat_y = torch.cat(y, dim=1)
+        return self.cv2(cat_y)
