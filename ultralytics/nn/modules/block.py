@@ -1367,90 +1367,64 @@ class A2C2f(nn.Module):
 # вот этот класс надо переписывать он просто накидывает аттеншен поверх ВСЕГО слоя 
 # а надо накидывать отдельно на каждый фильтр насколько я понял
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+
+
 
 class RFAConv(nn.Module):
-    """
-    Пример модуля Receptive Field Attention Convolution,
-    где для каждого локального рецептивного поля мы учимся
-    генерировать собственные весовые коэффициенты (attention map).
-    """
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        kernel_size=3,
-        stride=1,
-        padding=1,
-        groups=1,
-        reduction=4,  # для снижения размерности во "вспомогательной" ветви
-    ):
-        super(RFAConv, self).__init__()
+    """Receptive Field Attention Convolution, адаптированный по аналогии с Conv."""
+    default_act = nn.SiLU()  # как и в Conv
+
+    def __init__(self, c1, c2, k=1, s=2, p=0, g=1, reduction=1, d=1, act=True):
+        """
+        c1: число входных каналов,
+        c2: число выходных каналов,
+        k: размер ядра,
+        s: шаг,
+        p: паддинг (если None, вычисляется через autopad),
+        g: число групп,
+        reduction: коэффициент редукции каналов в ветви внимания,
+        d: дилатация,
+        act: функция активации (по умолчанию SiLU).
+        """
+        super().__init__()
         
-        # --- Основная сверточная ветвь ---
-        self.conv_main = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            groups=groups,
-            bias=False
-        )
-        self.bn_main = nn.BatchNorm2d(out_channels)
-
-        # --- Внимание (attention) ---
-        # Идея: вычислить "маску внимания" (такого же размера, что и выход conv_main),
-        # чтобы затем помножить результат основной свёртки на эту маску.
-        #
-        # Ниже - простейший вариант, когда мы берём тот же вход (in_channels) и
-        # прогоняем через ещё одну свёртку (или несколько слоёв), получая на выходе
-        # out_channels (чтобы помножить по-канально).
-        
-        self.conv_att = nn.Conv2d(
-            in_channels,
-            out_channels // reduction,  # сократим кол-во каналов, чтобы снизить вычисл.сложность
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            groups=groups,
-            bias=False
-        )
-        self.bn_att1 = nn.BatchNorm2d(out_channels // reduction)
-
-        # Восстанавливаем каналы назад к out_channels
-        self.conv_att2 = nn.Conv2d(
-            out_channels // reduction,
-            out_channels,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=False
-        )
-        self.bn_att2 = nn.BatchNorm2d(out_channels)
-
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        # --- Основная ветвь (feature extraction) ---
-        feat = self.conv_main(x)           # [B, out_channels, H, W]
-        feat = self.bn_main(feat)
+        print(f" RFA_Conv c1 {c1} , c2 {c2} , k {k}")
+        # --- Основная ветвь ---
+        self.conv_main = nn.Conv2d(c1, c2, k, s, p, groups=g, dilation=d, bias=False)
+        self.bn_main = nn.BatchNorm2d(c2)
 
         # --- Ветвь внимания ---
-        att = self.conv_att(x)            # [B, out_channels//reduction, H, W]
-        att = self.bn_att1(att)
-        att = F.relu(att, inplace=True)
+        # Сокращаем число каналов для вычисления attention map
+        self.conv_att = nn.Conv2d(c1, c2 // reduction, k, s, p, groups=g, dilation=d, bias=False)
+        self.bn_att1 = nn.BatchNorm2d(c2 // reduction)
+        # Восстанавливаем число каналов до c2
+        self.conv_att2 = nn.Conv2d(c2 // reduction, c2, 1, 1, 0, bias=False)
+        self.bn_att2 = nn.BatchNorm2d(c2)
+        self.sigmoid = nn.Sigmoid()
 
-        att = self.conv_att2(att)         # [B, out_channels, H, W]
-        att = self.bn_att2(att)
-        att = self.sigmoid(att)           # значения в диапазоне [0..1]
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
-        # --- Применяем карту внимания к результату основной ветви ---
-        out = feat * att                  # Помножили поэлементно (B,C,H,W)
+    def forward(self, x):
+        print(f"RFAConv in: {x.shape}, stride={self.conv_main.stride}, padding={self.conv_main.padding}")
+        # Основная ветвь: свёртка, BN, активация
+        feat = self.act(self.bn_main(self.conv_main(x)))
+        # Ветка внимания: свёртка -> BN -> ReLU -> свёртка -> BN -> Sigmoid
+        att = F.relu(self.bn_att1(self.conv_att(x)), inplace=True)
+        att = self.bn_att2(self.conv_att2(att))
+        att = self.sigmoid(att)
+        # Применяем attention map к основным признакам
 
-        return out
+        print(f" RFA_Conv out {(feat*att).shape}")
+        return feat * att
+
+    def forward_fuse(self, x):
+        """Вариант forward без батч-нормализации (например, для fused модели)."""
+        feat = self.act(self.conv_main(x))
+        att = F.relu(self.conv_att(x), inplace=True)
+        att = self.conv_att2(att)
+        att = self.sigmoid(att)
+        return feat * att
+
 
 class ZPool(nn.Module):
     """
