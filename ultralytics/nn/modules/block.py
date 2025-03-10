@@ -1408,7 +1408,7 @@ class RFAConv(nn.Module):
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
     def forward(self, x):
-        print(f"RFAConv in: {x.shape}, stride={self.conv_main.stride}, padding={self.conv_main.padding}")
+        #print(f"RFAConv in: {x.shape}, stride={self.conv_main.stride}, padding={self.conv_main.padding}")
         # Основная ветвь: свёртка, BN, активация
         feat = self.act(self.bn_main(self.conv_main(x)))
         # Ветка внимания: свёртка -> BN -> ReLU -> свёртка -> BN -> Sigmoid
