@@ -1387,8 +1387,11 @@ class RFAConv(nn.Module):
         act: функция активации (по умолчанию SiLU).
         """
         super().__init__()
-        
-        print(f" RFA_Conv c1 {c1} , c2 {c2} , k {k}")
+        p=0
+        s=2
+
+        #print(f" RFA_Conv c1 {c1} , c2 {c2} , k {k}")
+
         # --- Основная ветвь ---
         self.conv_main = nn.Conv2d(c1, c2, k, s, p, groups=g, dilation=d, bias=False)
         self.bn_main = nn.BatchNorm2d(c2)
@@ -1414,7 +1417,7 @@ class RFAConv(nn.Module):
         att = self.sigmoid(att)
         # Применяем attention map к основным признакам
 
-        print(f" RFA_Conv out {(feat*att).shape}")
+        #print(f" RFA_Conv out {(feat*att).shape}")
         return feat * att
 
     def forward_fuse(self, x):
